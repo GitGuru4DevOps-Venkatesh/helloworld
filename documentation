@@ -1,0 +1,234 @@
+Prerequisite:
+
+Create ubuntu server in aws  account (Os/ 2cpu/ 100gb min)
+
+Install Java11
+
+Install Maven latest version
+
+Install latest Jenkins
+
+Install Sonarqube8 on the ubuntu server
+
+Install nexus3 on the ubuntu server
+
+Install Docker on the ubuntu server
+
+ 
+
+ 
+
+Java installation steps:
+
+
+To install Jenkins on Ubuntu, follow below set of commands:
+wget -q -O - https://pkg.jenkins.io/debian-stable/jenkins.io.key |   sudo apt-key add -
+sudo sh -c 'echo deb https://pkg.jenkins.io/debian-stable binary/ > \/etc/apt/sources.list.d/jenkins.list'
+sudo apt-get update
+sudo apt-get install jenkins -y
+sudo service jenkins start
+sudo service jenkins status
+ 
+
+Sonarqube Installation steps:
+
+
+cd /opt 
+sudo curl -O https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-8.3.0.34182.zip  
+sudo apt-get install unzip  
+sudo unzip sonarqube-8.3.0.34182.zip -d /opt/  
+sudo mv /opt/sonarqube-8.3.0.34182/ /opt/sonarqube  
+cd /opt/sonarqube/  
+sudo groupadd sonar  
+sudo useradd -c "SonarQube - User" -d /opt/sonarqube/ -g sonar sonar  
+sudo chown sonar:sonar /opt/sonarqube/ -R  
+sudo vim /opt/sonarqube/conf/sonar.properties   
+  
+   ####Un-comment these lines and modify them as necessary.
+   
+sonar.jdbc.username=admin   
+sonar.jdbc.password=admin
+vim /etc/systemd/system/sonarqube.service   
+  
+  ####Add this content into the “sonarqube.service” file.
+[Unit]
+Description=SonarQube service
+After=syslog.target network.target
+  
+[Service]
+Type=forking
+
+ExecStart=/opt/sonarqube/bin/linux-x86-64/sonar.sh start
+ExecStop=/opt/sonarqube/bin/linux-x86-64/sonar.sh stop
+
+User=sonar
+Group=sonar
+Restart=always
+
+LimitNOFILE=65536
+LimitNPROC=4096
+
+
+[Install]
+WantedBy=multi-user.target
+
+
+systemctl daemon-reload 
+systemctl enable sonarqube.service
+systemctl start sonarqube.service
+systemctl status -l sonarqube.service
+ 
+
+Nexus Installation steps:
+
+
+sudo wget https://download.sonatype.com/nexus/3/latest-unix.tar.gz2) 
+sudo tar -xvf latest-unix.tar.gz3) 
+mv nexus-3.46.0-01 /opt/4) mv sonatype-work/ /opt/
+cd /opt
+mv nexus-3.46.0-01/ nexus
+###Create a user called Nexus####     
+sudo adduser nexus
+
+####Give permission to Nexus user###
+sudo chown -R nexus:nexus /opt/nexus
+sudo chown -R nexus:nexus /opt/sonatype-work
+
+sudo vim /opt/nexus/bin/nexus.rc
+    run_as_user="nexus"
+ 
+##Modify memory settings
+  sudo vim /opt/nexus/bin/nexus.vmoptions
+  change to 512m
+
+##Configure Nexus to run as a service
+  sudo vim /etc/systemd/system/nexus.service
+       
+   ##Copy the below content.
+       
+[Unit]
+Description=nexus service
+After=network.target
+[Service]
+Type=forking
+LimitNOFILE=65536
+User=nexus
+Group=nexus
+ExecStart=/opt/nexus/bin/nexus start
+ExecStop=/opt/nexus/bin/nexus stop
+User=nexus
+Restart=on-abort
+[Install]
+WantedBy=multi-user.target
+
+# Now Start Nexus
+     sudo systemctl enable nexus
+     sudo systemctl start nexus
+     sudo systemctl status nexus
+
+# tail -f /opt/sonatype-work/nexus3/log/nexus.log
+
+
+ 
+
+CI/CD Workflow:
+
+ 
+
+Create the CI/CD pipeline using Jenkins declarative pipeline.
+
+Clone the source code from the GitHub repo (Java/Nodejs).
+
+Configure java and maven dependency in configuration Tools (Jenkins).
+
+Integrate sonarqube in Manage Jenkins --> Configuration Tools.
+
+Integrate Nexus in Manage Jenkins --> Configuration Tools.
+
+Write a declarative pipeline with all the set of stages and steps as below.
+
+ 
+
+Declarative Pipeline:
+
+ 
+
+
+pipeline {
+  agent any
+
+  tools {
+    jdk 'Java'
+    maven 'Maven'
+  }
+  
+  environment {
+
+      sonar_url = 'http://IP:9000'
+      sonar_username = 'admin'
+      sonar_password = 'admin'
+      nexus_url = 'IP:8081'
+      artifact_version = '4.0.0'
+
+ }
+ parameters {
+      string(defaultValue: 'main', description: 'Please type any branch name to deploy', name: 'Branch')
+ }  
+
+stages {
+    stage('Git checkout'){
+      steps {
+        git branch: '${Branch}',
+        url: 'url'
+      }
+    }
+    stage('Maven build'){
+      steps {
+        sh 'mvn clean install'
+      }
+    }
+  stage ('Sonarqube Analysis'){
+           steps {
+           withSonarQubeEnv('Sonarqube') {
+           sh '''
+           mvn -e -B sonar:sonar -Dsonar.java.source=1.8 -Dsonar.host.url="${sonar_url}" -Dsonar.login="${sonar_username}" -Dsonar.password="${sonar_password}" -Dsonar.sourceEncoding=UTF-8
+           '''
+           }
+         }
+      } 
+      stage ('Publish Artifact') {
+        steps {
+          nexusArtifactUploader artifacts: [[artifactId: '', classifier: '', file: "target/war", type: 'war']], credentialsId: 'nexus-cred', groupId: '', nexusUrl: "${nexus_url}", nexusVersion: 'nexus3', protocol: 'http', repository: '', version: "${artifact_version}"
+        }
+      }
+      
+      stage ('Build Docker Image'){
+        steps {
+          sh '''
+          cd ${WORKSPACE}
+          docker build -t image --file=Dockerfile ${WORKSPACE}
+          '''
+        }
+      }
+      stage ('Publish Docker Image'){
+        steps {
+          sh '''
+          docker push image
+          '''
+        }
+      }
+      stage ('Deploy to kubernetes'){
+        steps{
+          script {
+            sh "kubectl config use-context clusterID"
+            sh "cd ${WORKSPACE}"
+            sh "kubectl apply -f '${WORKSPACE}'/kubernetes.yaml"
+          }
+         }
+        }
+     }
+   }
+ 
+
+ 
+
